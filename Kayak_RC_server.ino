@@ -276,21 +276,28 @@ void BTS7960SpeedRampTo(uint8_t request)
     byte dutyCycle = map(request, 0, 100, 0, 0xFF);
 
     if (lastPWMdutyCycle > dutyCycle) {
-        debug_p("Ramp DOWN: ");
-        for (uint8_t x=lastPWMdutyCycle; x > dutyCycle; x--){
+        debug_p("Ramp DOWN: " + String(lastPWMdutyCycle));
+        for (uint8_t x=lastPWMdutyCycle, uint8_t maxLineChars=10; x > dutyCycle; x--){
             //debug_printf("%d ", x);
-            debug_p(String(x) + " ");
+            //debug_p(String(x) + " ");
+            debug_p(".");
+            if (!(++maxLineChars % 80)) { debug_pln(""); maxLineChars=1; }
             ledcWrite(PWMchannel, x);
             //delay(10);
         }
+        debug_p(String(x));
+
     } else if (lastPWMdutyCycle < dutyCycle) {
-        debug_p("Ramp UP: ");
-        for (uint8_t x=lastPWMdutyCycle; x < dutyCycle; x++){
+        debug_p("Ramp UP: " + String(lastPWMdutyCycle));
+        for (uint8_t x=lastPWMdutyCycle, uint8_t maxLineChars=10; x < dutyCycle; x++){
             //debug_printf("%d ", x);
-            debug_p(String(x) + " ");
+            //debug_p(String(x) + " ");
+            debug_p(".");
+            if (!(++maxLineChars % 80)) { debug_pln(""); maxLineChars=1; }
             ledcWrite(PWMchannel, x);
             //delay(10);
         }
+        debug_p(String(x));
     }
     debug_pln("");
     lastPWMdutyCycle = dutyCycle;
