@@ -22,6 +22,9 @@
 //   SDA: 23
 //   SCL: 22
 
+/*
+ * ToDo: Using ADC
+ */
 
 #define CLIENT_ADDRESS      "7CDFA194CA86"
 #define RELAY_FORWARD_PIN   14
@@ -67,6 +70,8 @@ PixelFlashEvent_t pixelAction;
 
 void flash_pixel(uint32_t color0, uint8_t flashes=1, uint32_t duration=500, uint32_t color1=NeoBlack);
 
+// Only distinguishabe colors through Yellow mSeahorse case:
+// uint32_t color_array[]={NeoWhite, NeoRed, NeoGreen,  NeoBlack};
 
 
 // DEFAULTS:
@@ -97,11 +102,17 @@ void flash_pixel(uint32_t color0, uint8_t flashes=1, uint32_t duration=500, uint
 uint8_t motorDirection=CW;  // must only be CW  (Forward?) or CCW (Reverse?)
 */
 
+/*
+ * SHUNT details:  100A 75mV     so 75/100 = .75mΩ (milliOhms)
+ * For Zanduino/INA library, use begin(AMPS 100, Microohms (.75 * 1000 = 750))
+ *
+ */
+
 GEAR_t lastGear=NEUTRAL;
 uint8_t lastSpeed=0;
 uint8_t lastPWMdutyCycle=0;
-static uint32_t tick50=0; // , tick128=0, tick10000=0, tick30000=0;
-
+static uint32_t tick50=0, tick200=0; // , tick10000=0, tick30000=0;
+uint32_t msgIDcounter=0;
 
 SimpleEspNowConnection simpleEspConnection(SimpleEspNowRole::SERVER);
 Adafruit_NeoPixel pixel(1 /*NUMPIXELS*/, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -160,67 +171,144 @@ bool sendStructMessage() {
     return (simpleEspConnection.sendMessage((uint8_t * ) & myData, sizeof(myData), clientAddress));
 }
 
-void OnSendError(uint8_t * ad) {
-    debug_pln("SENDING TO '" + simpleEspConnection.macToStr(ad) + "' WAS NOT POSSIBLE!");
-    flash_pixel(NeoOrange, 3, 200);  //  uint32_t color0, uint8_t flashes=1, uint32_t duration=500,uint32_t color1=NeoBlack)
+
+void handle_MOTOR_CONTROL_message(yakMessage_t *p_yakMessage)
+{
+    setDirection(p_yakMessage->gear);
+
+    // only set final speed if we are NOT in NEUTRAL
+    if (p_yakMessage->gear != NEUTRAL && lastSpeed != p_yakMessage->speed) {
+        if ( p_yakMessage->speed < 4 ) {
+            p_yakMessage->speed = 0;
+        } else if ( p_yakMessage->speed > 97 ) {
+            p_yakMessage->speed = 100;
+        }
+
+        BTS7960SpeedRampTo(p_yakMessage->speed);
+        lastSpeed = p_yakMessage->speed;
+    }
 }
+
+
+void handle_PING_message(yakMessage_t *p_yakMessage)
+{
+    debug_printf("Let's figure out how to process a PING message from the Client!\n");
+   // p_yakMessage->speed) {
+
+    //esp_wifi_set_promiscuous(true);
+    //esp_wifi_set_promiscuous_rx_cb(&promiscuous_rx_cb);
+
+}
+
+void handle_BATTERY_CHECK_message(yakMessage_t *p_yakMessage)
+{
+    yakCommsMessage_t yakCommsMessage;
+
+    debug_printf("Let's figure out how to process a BATTERY_CHECK message from the Client!\n");
+
+    //struct_message myData;
+
+    // typedef struct _yakCommsMessage {
+    //     MSG_t       msgType;   // uniqueify it a bit  ("COMMS")
+    //     uint32_t    msgID;
+    //     uint32_t    initialMsgID;
+    //     ACTION_t    response;
+    //     YAK_COMMS_t commState;
+    //     uint32_t    rssi;
+    //     uint32_t    v1;
+    //     uint32_t    v2;
+    //     uint32_t    v3;
+    // } yakCommsMessage_t;
+
+    yakCommsMessage.msgType         = COMMS;
+    yakCommsMessage.msgID           = msgIDcounter++;
+    yakCommsMessage.initialMsgID    = p_yakMessage->msgID;
+    yakCommsMessage.response        = BATTERY_CHECK;
+    yakCommsMessage.commState       = CONNECTED;   // USELESS??
+    yakCommsMessage.rssi            = 7;
+    yakCommsMessage.v1              = 101;
+    yakCommsMessage.v2              = 202;
+    yakCommsMessage.v3              = 303;
+    snprintf(yakCommsMessage.msgLine2, MSG_LINE_2_MAX_CHARS, "Wow Battery GOOD");
+
+    bool tempResult = simpleEspConnection.sendMessage((uint8_t * ) & yakCommsMessage, sizeof(yakCommsMessage), clientAddress);
+
+    debug_pln("handle_BATTERY_CHECK_message sendMessage returned: " + String( tempResult));
+}
+
 
 void OnMessage(uint8_t * ad, const uint8_t * message, size_t len)
 {
 
     if ((MSG_t) message[0] == YAK) {    // cast to pointer to this message type?
+        flash_pixel(NeoGreen, 1, 50);  //  uint32_t color0, uint8_t flashes=1, uint32_t duration=500,uint32_t color1=NeoBlack)
         yakMessage_t yakMessage;
         memcpy( &yakMessage, message, len);
         debug_printf("yakMessage: msgType (val):%X. msgID:%d, action:%s, gear:%s, speed:%d\n",
                       yakMessage.msgType, yakMessage.msgID, ACTION_t_v[yakMessage.action],
                       GEAR_t_v[yakMessage.gear], yakMessage.speed);
 
+        // actions are ACTION_t: { PING=0, MOTOR_CONTROL=1, BATTERY_CHECK=2, BATTERY_MESSAGING=3, NEW_CLIENT_MAC=4, BLUETOOTH_PAIR=5 }
         if (yakMessage.action == MOTOR_CONTROL) {
-            if (lastGear != yakMessage.gear) {
-                setDirection(yakMessage.gear);
-                debug_printf("\nSHIFTED!\n");
+            handle_MOTOR_CONTROL_message(&yakMessage);
+        } else if (yakMessage.action == PING) {
+            handle_PING_message(&yakMessage);
 
-                //debug_printf("\nNow lastSpeed: %d, yakMessage.speed: %d  (Will we get there?)\n", lastSpeed, yakMessage.speed);
-            }
+        } else if (yakMessage.action == BATTERY_CHECK) {
+            handle_BATTERY_CHECK_message(&yakMessage);
 
-            if (lastSpeed != yakMessage.speed) {
-                if ( yakMessage.speed < 4 ) {
-                    yakMessage.speed = 0;
-                } else if ( yakMessage.speed > 97 ) {
-                    yakMessage.speed = 100;
-                }
-
-                BTS7960SpeedRampTo(yakMessage.speed);
-                lastSpeed = yakMessage.speed;
-            }
+        } else {
+            debug_printf("Unhandled YAK message type: <0x%X>\n", yakMessage.action);
         }
     } else {
-        Serial.printf("MESSAGE:[%d]%s from %s\n", len, (char * ) message, simpleEspConnection.macToStr(ad).c_str());
+        debug_printf("UNKNOWN, Unhandled message received\n");
     }
 }
 
-void OnPaired(uint8_t * ga, String ad) {
+
+void OnSendError(uint8_t * ad)
+{
+    debug_pln("Send to " + simpleEspConnection.macToStr(ad) + " FAILED");
+    flash_pixel(NeoRed, 1, 300);  //  uint32_t color0, uint8_t flashes=1, uint32_t duration=500,uint32_t color1=NeoBlack)
+}
+
+
+void OnSendDone(uint8_t * ad)
+{
+    debug_pln("OnSendDone SEND_OK");
+    flash_pixel(NeoMagenta, 1, 100);  //  uint32_t color0, uint8_t flashes=1, uint32_t duration=500,uint32_t color1=NeoBlack)
+
+}
+
+
+void OnPaired(uint8_t * ga, String ad)
+{
     debug_pln("EspNowConnection : Client '" + ad + "' paired! ");
     simpleEspConnection.endPairing();
 
-    flash_pixel(NeoPurple, 1, 400);  //  uint32_t color0, uint8_t flashes=1, uint32_t duration=500,uint32_t color1=NeoBlack)
+    flash_pixel(NeoWhite, 1, 100);  //  uint32_t color0, uint8_t flashes=1, uint32_t duration=500,uint32_t color1=NeoBlack)
     clientAddress = ad;
 }
 
 
-void OnConnected(uint8_t * ga, String ad) {
+void OnConnected(uint8_t * ga, String ad)
+{
     //debug_pln("EspNowConnection : Client '" + ad + "' connected! ");
 
-    yakCommsMessage_t commsMsg = { COMMS,          // MSG_t msgType
-                                   serverMsgID++,  // uint32_t msgID
-                                   CONNECTED,      // YAK_COMMS_t commState
-                                   0,              // uint32_t rssi
-                                 };
-
+    // ToDo: Convert to explicit member naming
+    yakCommsMessage_t commsMsg = { COMMS,        // MSG_t msgType
+                                   0,            // uint32_t msgID;
+                                   0xFFFFFFFF,   // muint32_t initialMsgID;
+                                   AWAKE,        // ACTION_t response;
+                                   CONNECTED,    // YAK_COMMS_t commState;
+                                   7,            // uint32_t rssi;
+                                   0,            // uint32_t v1;
+                                   0,            // uint32_t v2;
+                                   0,             // uint32_t v3;
+                                   {0}};
     simpleEspConnection.sendMessage((uint8_t * ) &commsMsg, sizeof(yakCommsMessage_t));
 
-   flash_pixel(NeoGreen, 3, 200);  //  uint32_t color0, uint8_t flashes=1, uint32_t duration=500,uint32_t color1=NeoBlack)
-
+    flash_pixel(NeoGreen, 1, 100);  //  uint32_t color0, uint8_t flashes=1, uint32_t duration=500,uint32_t color1=NeoBlack)
 }
 
 /*
@@ -265,19 +353,28 @@ void BTS7960Gear(GEAR_t gear)
     }
 }
 
-void BTS7960Speed(uint8_t dutyCycle)
+void MD30Cgear(GEAR_t gear)
 {
-    ledcWrite(PWMchannel, dutyCycle);
-    lastPWMdutyCycle = dutyCycle;
+    switch(gear) {
+    case FORWARD:
+    case NEUTRAL:
+        digitalWrite(FWD_EN_PIN, HIGH);
+        break;
+    case REVERSE:
+        digitalWrite(FWD_EN_PIN, LOW);
+        break;
+    }
 }
+
 
 void BTS7960SpeedRampTo(uint8_t request)
 {
     byte dutyCycle = map(request, 0, 100, 0, 0xFF);
+    uint8_t x, maxLineChars=10;
 
     if (lastPWMdutyCycle > dutyCycle) {
         debug_p("Ramp DOWN: " + String(lastPWMdutyCycle));
-        for (uint8_t x=lastPWMdutyCycle, uint8_t maxLineChars=10; x > dutyCycle; x--){
+        for (x=lastPWMdutyCycle; x > dutyCycle; x--){
             //debug_printf("%d ", x);
             //debug_p(String(x) + " ");
             debug_p(".");
@@ -289,7 +386,7 @@ void BTS7960SpeedRampTo(uint8_t request)
 
     } else if (lastPWMdutyCycle < dutyCycle) {
         debug_p("Ramp UP: " + String(lastPWMdutyCycle));
-        for (uint8_t x=lastPWMdutyCycle, uint8_t maxLineChars=10; x < dutyCycle; x++){
+        for (x=lastPWMdutyCycle; x < dutyCycle; x++){
             //debug_printf("%d ", x);
             //debug_p(String(x) + " ");
             debug_p(".");
@@ -304,22 +401,27 @@ void BTS7960SpeedRampTo(uint8_t request)
 }
 
 
+void MD30CspeedRampTo(uint8_t request)
+{
+    BTS7960SpeedRampTo(request);
+}
+
+
 void setDirection(GEAR_t gear)
 {
-     if (gear != lastGear) {
-        // Ramp down speed
-        debug_p("Gear change ramp: ");
+     // Ramp down speed if a gear change
+     if (gear != lastGear ) {
+        //debug_printf("Gear change ramp: was: %s, requesting: %s  ", GEAR_t_v[lastGear], GEAR_t_v[gear] );
         BTS7960SpeedRampTo(0);
         lastSpeed = 0;
         BTS7960Gear(NEUTRAL);
-        lastGear = NEUTRAL;
-        debug_printf(" -> NEUTRAL%s", gear==NEUTRAL?"\n" :"");
      }
 
     switch(gear) {
     case FORWARD:
-        debug_pln(" -> FORWARD");
+        //debug_pln(" -> FORWARD");
         BTS7960Gear(FORWARD);
+        lastGear = FORWARD;
         //digitalWrite(RELAY_REVERSE_PIN, LOW);
         //delay(50);
         //digitalWrite(RELAY_FORWARD_PIN, HIGH);
@@ -327,12 +429,21 @@ void setDirection(GEAR_t gear)
         break;
 
     case REVERSE:
-        debug_pln(" -> REVERSE");
+        //debug_pln(" -> REVERSE");
         BTS7960Gear(FORWARD);
+        lastGear = REVERSE;
         //digitalWrite(RELAY_FORWARD_PIN, LOW);
         //delay(50);
         //digitalWrite(RELAY_REVERSE_PIN, HIGH);
         //delay(50);
+        break;
+
+    case NEUTRAL:
+        //debug_pln(" -> NEUTRAL");
+        BTS7960SpeedRampTo(0);
+        BTS7960Gear(NEUTRAL);
+        lastSpeed = 0;
+        lastGear = NEUTRAL;
         break;
     }
 }
@@ -390,6 +501,9 @@ void flash_pixel(uint32_t color0, uint8_t flashes, uint32_t duration, uint32_t c
 void setup()
 {
     Serial.begin(115200);
+    pixel.begin();
+    pixel.setPixelColor(0, NeoWhite);
+    pixel.show();
 
     pinMode(BOARD_LED, OUTPUT);
     uint8_t lastBlink=3;
@@ -412,6 +526,7 @@ void setup()
     simpleEspConnection.onMessage( & OnMessage);
     simpleEspConnection.onPaired( & OnPaired);
     simpleEspConnection.onSendError( & OnSendError);
+    simpleEspConnection.onSendDone( & OnSendDone);
     simpleEspConnection.onConnected( & OnConnected);
 
     debug_pln("I'm the server. My MAC address is " + WiFi.macAddress());
@@ -442,10 +557,15 @@ void setup()
 
     // NOT necessary on THIS ESP32:  pinMode(NEOPIXEL_POWER, OUTPUT);
     // digitalWrite(NEOPIXEL_POWER, 1);
-    pixel.begin();
+
+    pixel.setPixelColor(0, NeoBlack);
+    pixel.show();
 }
 
+void task200ms(void)
+{
 
+}
 
 void task50ms(void)
 {
@@ -511,6 +631,11 @@ void loop() {
         tick50 = sysTick;
         task50ms();
     }
+
+    //if ((sysTick > 30000) && (sysTick - tick200 > 200)) {
+    //    tick200 = sysTick;
+    //    task200ms();
+    //}
 
     while (Serial.available()) {
         char inChar = (char) Serial.read();
